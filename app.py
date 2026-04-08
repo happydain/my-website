@@ -192,7 +192,7 @@ def page_overview(df_inv, df_inv_full):
     st.markdown("---")
 
     # 연도별 매출 추이 라인 차트
-    st.subheader("📈 연도별 매출 추이")
+    st.subheader("📈 연도별 매출 추이------------------------------------------------")
     yearly = df_inv.groupby("Year").agg(
         Revenue=("Total", "sum"),
         Orders=("InvoiceId", "count"),
