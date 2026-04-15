@@ -84,3 +84,132 @@ SQLite 기반 Chinook 데이터베이스를 사용했으며, Plotly 시각화를
 따라서 프로모션 시점, 캠페인 운영, 목표 설정에 활용할 수 있다.
 
 ---
+
+# 대시보드에 사용된 SQL 구문 설명
+
+본 대시보드는 `app.py` 내부 SQL을 통해 SQLite 데이터를 조회하고, 조회된 데이터를 Pandas로 가공한 뒤 Plotly로 시각화하였습니다.  
+각 화면은 아래 SQL 구문을 기반으로 구성되었습니다.
+
+---
+
+## 1. 공통 데이터 조회 SQL
+
+주문 데이터를 기준으로 고객 정보와 담당 영업사원 정보를 결합한 SQL입니다.  
+매출 Overview, 고객 & 지역 분석, 영업사원 성과 화면의 기초 데이터로 사용됩니다.
+
+```sql
+SELECT
+    i.InvoiceId,
+    i.CustomerId,
+    i.InvoiceDate,
+    i.BillingCountry AS Country,
+    i.BillingCity AS City,
+    i.Total,
+    c.FirstName || ' ' || c.LastName AS CustomerName,
+    c.SupportRepId,
+    e.FirstName || ' ' || e.LastName AS SalesRep
+FROM invoices i
+LEFT JOIN customers c
+    ON i.CustomerId = c.CustomerId
+LEFT JOIN employees e
+    ON c.SupportRepId = e.EmployeeId;
+```
+
+---
+
+## 2. 장르 & 상품분석 SQL
+
+상품 단위 판매 데이터를 장르, 앨범, 아티스트 정보와 결합한 SQL입니다.  
+장르별 매출, 판매 비중, 인기 아티스트 분석에 활용됩니다.
+
+```sql
+SELECT
+    ii.InvoiceLineId,
+    ii.InvoiceId,
+    ii.TrackId,
+    ii.UnitPrice,
+    ii.Quantity,
+    (ii.UnitPrice * ii.Quantity) AS LineTotal,
+    t.Name AS TrackName,
+    g.Name AS Genre,
+    al.Title AS Album,
+    ar.Name AS Artist,
+    i.InvoiceDate,
+    i.BillingCountry AS Country
+FROM invoice_items ii
+LEFT JOIN tracks t
+    ON ii.TrackId = t.TrackId
+LEFT JOIN genres g
+    ON t.GenreId = g.GenreId
+LEFT JOIN albums al
+    ON t.AlbumId = al.AlbumId
+LEFT JOIN artists ar
+    ON al.ArtistId = ar.ArtistId
+LEFT JOIN invoices i
+    ON ii.InvoiceId = i.InvoiceId;
+```
+
+---
+
+## 3. 고객 조회 SQL
+
+전체 고객 정보를 조회하는 SQL입니다.  
+고객 관리 화면에서 고객 검색, 조회, 수정 대상 선택에 사용됩니다.
+
+```sql
+SELECT
+    CustomerId,
+    FirstName,
+    LastName,
+    Company,
+    Address,
+    City,
+    State,
+    Country,
+    PostalCode,
+    Phone,
+    Fax,
+    Email,
+    SupportRepId
+FROM customers
+ORDER BY CustomerId;
+```
+
+---
+
+## 4. 고객 수정 SQL
+
+선택한 고객 정보를 수정하는 SQL입니다.  
+고객 관리 화면의 수정 기능에 사용됩니다.
+
+```sql
+UPDATE customers
+SET
+    FirstName = ?,
+    LastName = ?,
+    Company = ?,
+    City = ?,
+    Country = ?,
+    Email = ?
+WHERE CustomerId = ?;
+```
+
+---
+
+## 5. 신규 고객 추가 SQL
+
+신규 고객 정보를 저장하는 SQL입니다.  
+고객 관리 화면의 신규 고객 추가 기능에 사용됩니다.
+
+```sql
+INSERT INTO customers (
+    FirstName,
+    LastName,
+    Company,
+    City,
+    Country,
+    Email,
+    SupportRepId
+)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
