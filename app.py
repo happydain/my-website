@@ -24,17 +24,64 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# 차트 한글 폰트 깨짐 방지 (Plotly는 웹폰트를 사용하므로 이 설정으로 충분)
 PLOTLY_FONT = dict(
     family="Noto Sans KR, Malgun Gothic, AppleGothic, sans-serif",
     size=12,
 )
 
-# 색상 팔레트
-COLOR_PALETTE = ["#2563eb", "#7c3aed", "#f59e0b", "#10b981", "#ef4444",
-                 "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1"]
+COLOR_PALETTE = [
+    "#2563eb", "#7c3aed", "#f59e0b", "#10b981", "#ef4444",
+    "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1"
+]
 
 DB_PATH = "chinook.db"
+
+
+# ============================================================
+# 공통 DB 유틸
+# ============================================================
+def get_connection():
+    """SQLite 연결 생성"""
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+
+def table_exists(table_name: str) -> bool:
+    """테이블 존재 여부 확인"""
+    if not os.path.exists(DB_PATH):
+        return False
+
+    conn = get_connection()
+    try:
+        query = """
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND lower(name)=lower(?)
+        """
+        row = conn.execute(query, (table_name,)).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def get_table_name(candidates):
+    """후보 테이블명 중 실제 존재하는 이름 반환"""
+    if not os.path.exists(DB_PATH):
+        return None
+
+    conn = get_connection()
+    try:
+        existing = pd.read_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'",
+            conn
+        )["name"].tolist()
+        existing_lower = {name.lower(): name for name in existing}
+
+        for candidate in candidates:
+            if candidate.lower() in existing_lower:
+                return existing_lower[candidate.lower()]
+        return None
+    finally:
+        conn.close()
 
 
 # ============================================================
@@ -46,10 +93,23 @@ def load_data():
     if not os.path.exists(DB_PATH):
         return None
 
-    conn = sqlite3.connect(DB_PATH)
+    invoice_table = get_table_name(["invoices", "Invoice"])
+    customer_table = get_table_name(["customers", "Customer"])
+    employee_table = get_table_name(["employees", "Employee"])
+    invoice_line_table = get_table_name(["invoice_items", "InvoiceLine"])
+    track_table = get_table_name(["tracks", "Track"])
+    genre_table = get_table_name(["genres", "Genre"])
+    album_table = get_table_name(["albums", "Album"])
+    artist_table = get_table_name(["artists", "Artist"])
+
+    if not all([invoice_table, customer_table, employee_table, invoice_line_table,
+                track_table, genre_table, album_table, artist_table]):
+        return None
+
+    conn = get_connection()
     try:
         # 1) 매출 마스터 (invoices + customers + employees join)
-        invoices_query = """
+        invoices_query = f"""
             SELECT
                 i.InvoiceId,
                 i.CustomerId,
@@ -60,18 +120,18 @@ def load_data():
                 c.FirstName || ' ' || c.LastName AS CustomerName,
                 c.SupportRepId,
                 e.FirstName || ' ' || e.LastName AS SalesRep
-            FROM invoices i
-            LEFT JOIN customers c ON i.CustomerId = c.CustomerId
-            LEFT JOIN employees e ON c.SupportRepId = e.EmployeeId
+            FROM {invoice_table} i
+            LEFT JOIN {customer_table} c ON i.CustomerId = c.CustomerId
+            LEFT JOIN {employee_table} e ON c.SupportRepId = e.EmployeeId
         """
         df_invoices = pd.read_sql(invoices_query, conn)
-        df_invoices["InvoiceDate"] = pd.to_datetime(df_invoices["InvoiceDate"])
+        df_invoices["InvoiceDate"] = pd.to_datetime(df_invoices["InvoiceDate"], errors="coerce")
         df_invoices["Year"] = df_invoices["InvoiceDate"].dt.year
         df_invoices["Month"] = df_invoices["InvoiceDate"].dt.month
         df_invoices["YearMonth"] = df_invoices["InvoiceDate"].dt.to_period("M").astype(str)
 
-        # 2) 라인 아이템 (invoice_items + tracks + genres + albums + artists join)
-        items_query = """
+        # 2) 라인 아이템 (invoice_lines + tracks + genres + albums + artists join)
+        items_query = f"""
             SELECT
                 ii.InvoiceLineId,
                 ii.InvoiceId,
@@ -88,18 +148,132 @@ def load_data():
                 ar.Name AS Artist,
                 i.InvoiceDate,
                 i.BillingCountry AS Country
-            FROM invoice_items ii
-            LEFT JOIN tracks t ON ii.TrackId = t.TrackId
-            LEFT JOIN genres g ON t.GenreId = g.GenreId
-            LEFT JOIN albums al ON t.AlbumId = al.AlbumId
-            LEFT JOIN artists ar ON al.ArtistId = ar.ArtistId
-            LEFT JOIN invoices i ON ii.InvoiceId = i.InvoiceId
+            FROM {invoice_line_table} ii
+            LEFT JOIN {track_table} t ON ii.TrackId = t.TrackId
+            LEFT JOIN {genre_table} g ON t.GenreId = g.GenreId
+            LEFT JOIN {album_table} al ON t.AlbumId = al.AlbumId
+            LEFT JOIN {artist_table} ar ON al.ArtistId = ar.ArtistId
+            LEFT JOIN {invoice_table} i ON ii.InvoiceId = i.InvoiceId
         """
         df_items = pd.read_sql(items_query, conn)
-        df_items["InvoiceDate"] = pd.to_datetime(df_items["InvoiceDate"])
+        df_items["InvoiceDate"] = pd.to_datetime(df_items["InvoiceDate"], errors="coerce")
         df_items["Year"] = df_items["InvoiceDate"].dt.year
 
         return {"invoices": df_invoices, "items": df_items}
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 고객 관리용 함수
+# ============================================================
+def get_customers():
+    """customers 테이블 조회"""
+    customer_table = get_table_name(["customers", "Customer"])
+    if not customer_table:
+        return pd.DataFrame()
+
+    conn = get_connection()
+    try:
+        query = f"""
+            SELECT
+                CustomerId,
+                FirstName,
+                LastName,
+                Company,
+                Address,
+                City,
+                State,
+                Country,
+                PostalCode,
+                Phone,
+                Fax,
+                Email,
+                SupportRepId
+            FROM {customer_table}
+            ORDER BY CustomerId
+        """
+        return pd.read_sql(query, conn)
+    finally:
+        conn.close()
+
+
+def get_first_support_rep_id():
+    """기본 SupportRepId 조회"""
+    employee_table = get_table_name(["employees", "Employee"])
+    if not employee_table:
+        return None
+
+    conn = get_connection()
+    try:
+        query = f"SELECT EmployeeId FROM {employee_table} ORDER BY EmployeeId LIMIT 1"
+        row = conn.execute(query).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def update_customer(customer_id, first_name, last_name, company, city, country, email):
+    """특정 고객 정보 수정"""
+    customer_table = get_table_name(["customers", "Customer"])
+    if not customer_table:
+        raise ValueError("customers 테이블을 찾을 수 없습니다.")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        query = f"""
+            UPDATE {customer_table}
+            SET
+                FirstName = ?,
+                LastName = ?,
+                Company = ?,
+                City = ?,
+                Country = ?,
+                Email = ?
+            WHERE CustomerId = ?
+        """
+        cursor.execute(
+            query,
+            (first_name, last_name, company, city, country, email, customer_id)
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def insert_customer(first_name, last_name, company, city, country, email):
+    """신규 고객 추가"""
+    customer_table = get_table_name(["customers", "Customer"])
+    if not customer_table:
+        raise ValueError("customers 테이블을 찾을 수 없습니다.")
+
+    support_rep_id = get_first_support_rep_id()
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        query = f"""
+            INSERT INTO {customer_table} (
+                FirstName, LastName, Company, City, Country, Email, SupportRepId
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        cursor.execute(
+            query,
+            (
+                first_name.strip(),
+                last_name.strip(),
+                company.strip() if company else None,
+                city.strip() if city else None,
+                country.strip() if country else None,
+                email.strip(),
+                support_rep_id
+            )
+        )
+        conn.commit()
+        return cursor.lastrowid
     finally:
         conn.close()
 
@@ -130,7 +304,10 @@ def style_plotly(fig, height=400):
 
 def format_currency(value):
     """통화 형식으로 포맷팅"""
-    return f"${value:,.2f}"
+    try:
+        return f"${value:,.2f}"
+    except Exception:
+        return "$0.00"
 
 
 # ============================================================
@@ -144,13 +321,11 @@ def page_overview(df_inv, df_inv_full):
         st.warning("선택한 조건에 해당하는 데이터가 없습니다. 사이드바 필터를 조정해주세요.")
         return
 
-    # KPI 계산
     total_revenue = df_inv["Total"].sum()
     total_orders = len(df_inv)
     total_customers = df_inv["CustomerId"].nunique()
     avg_order = total_revenue / total_orders if total_orders > 0 else 0
 
-    # 전체 데이터 대비 비교 (delta)
     full_revenue = df_inv_full["Total"].sum()
     full_orders = len(df_inv_full)
     full_customers = df_inv_full["CustomerId"].nunique()
@@ -161,7 +336,6 @@ def page_overview(df_inv, df_inv_full):
     delta_customers = total_customers - full_customers
     delta_avg = avg_order - full_avg
 
-    # KPI 카드 4개
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric(
@@ -191,8 +365,7 @@ def page_overview(df_inv, df_inv_full):
 
     st.markdown("---")
 
-    # 연도별 매출 추이 라인 차트
-    st.subheader("📈 연도별 매출 추이------------------------------------------------")
+    st.subheader("📈 연도별 매출 추이")
     yearly = df_inv.groupby("Year").agg(
         Revenue=("Total", "sum"),
         Orders=("InvoiceId", "count"),
@@ -217,12 +390,10 @@ def page_overview(df_inv, df_inv_full):
     )
     st.plotly_chart(style_plotly(fig_line, height=380), use_container_width=True)
 
-    # 월별 매출 히트맵
     st.subheader("🔥 월별 매출 히트맵")
     heatmap = df_inv.groupby(["Year", "Month"])["Total"].sum().reset_index()
     pivot = heatmap.pivot(index="Year", columns="Month", values="Total").fillna(0)
 
-    # 모든 월(1~12)이 컬럼에 있도록 보장
     for m in range(1, 13):
         if m not in pivot.columns:
             pivot[m] = 0
@@ -260,7 +431,6 @@ def page_customers(df_inv):
         st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
         return
 
-    # 국가별 매출 Top 10
     st.subheader("🏆 국가별 매출 Top 10")
     country_rev = df_inv.groupby("Country").agg(
         Revenue=("Total", "sum"),
@@ -284,7 +454,6 @@ def page_customers(df_inv):
     )
     st.plotly_chart(style_plotly(fig_country, height=420), use_container_width=True)
 
-    # 국가별 고객 수 vs 평균 주문액 산점도
     st.subheader("💎 국가별 고객 수 vs 평균 주문액")
     scatter = df_inv.groupby("Country").agg(
         Customers=("CustomerId", "nunique"),
@@ -308,7 +477,6 @@ def page_customers(df_inv):
     fig_scatter.update_traces(textposition="top center", textfont_size=10)
     st.plotly_chart(style_plotly(fig_scatter, height=450), use_container_width=True)
 
-    # 고객별 총 구매액 순위 테이블
     st.subheader("👤 고객별 구매 순위")
     customer_rank = df_inv.groupby(["CustomerId", "CustomerName", "Country"]).agg(
         총주문수=("InvoiceId", "count"),
@@ -323,7 +491,6 @@ def page_customers(df_inv):
         "Country": "국가",
     })[["고객명", "국가", "총주문수", "총구매액", "평균주문액"]]
 
-    # 검색 기능
     search = st.text_input("🔍 고객명 또는 국가로 검색", placeholder="예: Smith, Germany...")
     if search:
         mask = (
@@ -356,7 +523,6 @@ def page_genres(df_items):
         st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
         return
 
-    # 장르별 판매량 도넛 차트
     col_a, col_b = st.columns([1, 1])
 
     with col_a:
@@ -366,7 +532,6 @@ def page_genres(df_items):
             Revenue=("LineTotal", "sum"),
         ).reset_index().sort_values("Quantity", ascending=False)
 
-        # Top 8 + 기타
         if len(genre_qty) > 8:
             top = genre_qty.head(8)
             others_qty = genre_qty.iloc[8:]["Quantity"].sum()
@@ -408,7 +573,6 @@ def page_genres(df_items):
             hide_index=True,
         )
 
-    # 장르별 매출 트렌드 (스택 영역 차트)
     st.subheader("📈 장르별 매출 트렌드 (Top 6)")
     top_genres = df_items.groupby("Genre")["LineTotal"].sum().nlargest(6).index.tolist()
     trend = df_items[df_items["Genre"].isin(top_genres)].groupby(["Year", "Genre"])["LineTotal"].sum().reset_index()
@@ -424,7 +588,6 @@ def page_genres(df_items):
     )
     st.plotly_chart(style_plotly(fig_area, height=400), use_container_width=True)
 
-    # 인기 아티스트 Top 15
     st.subheader("🎤 인기 아티스트 Top 15 (매출 기준)")
     artist_rev = df_items.groupby("Artist").agg(
         매출=("LineTotal", "sum"),
@@ -459,23 +622,20 @@ def page_sales_rep(df_inv):
         st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
         return
 
-    # SalesRep이 None인 행 제외
     df_rep = df_inv[df_inv["SalesRep"].notna()].copy()
 
     if df_rep.empty:
         st.warning("영업사원 정보가 있는 데이터가 없습니다.")
         return
 
-    # 담당자별 KPI
     rep_summary = df_rep.groupby("SalesRep").agg(
         매출=("Total", "sum"),
         주문수=("InvoiceId", "count"),
         고객수=("CustomerId", "nunique"),
     ).reset_index().sort_values("매출", ascending=False)
 
-    # 상단 KPI: 담당자별 카드
     cols = st.columns(len(rep_summary))
-    for idx, (col, row) in enumerate(zip(cols, rep_summary.itertuples())):
+    for col, row in zip(cols, rep_summary.itertuples()):
         with col:
             st.metric(
                 row.SalesRep,
@@ -486,7 +646,6 @@ def page_sales_rep(df_inv):
 
     st.markdown("---")
 
-    # 담당자별 매출/주문수/고객수 비교 막대 차트
     st.subheader("📊 담당자별 성과 비교")
     fig_compare = go.Figure()
     fig_compare.add_trace(go.Bar(
@@ -518,7 +677,6 @@ def page_sales_rep(df_inv):
     )
     st.plotly_chart(style_plotly(fig_compare, height=420), use_container_width=True)
 
-    # 담당자별 월별 매출 추이
     st.subheader("📈 담당자별 월별 매출 추이")
     monthly = df_rep.groupby(["YearMonth", "SalesRep"])["Total"].sum().reset_index()
     monthly = monthly.sort_values("YearMonth")
@@ -535,7 +693,6 @@ def page_sales_rep(df_inv):
     )
     st.plotly_chart(style_plotly(fig_monthly, height=400), use_container_width=True)
 
-    # 담당자별 고객 국가 분포
     st.subheader("🌐 담당자별 고객 국가 분포")
     country_dist = df_rep.groupby(["SalesRep", "Country"]).agg(
         매출=("Total", "sum"),
@@ -553,85 +710,209 @@ def page_sales_rep(df_inv):
 
 
 # ============================================================
+# 페이지 5: 고객 관리
+# ============================================================
+def page_customer_management():
+    st.title("🧾 고객 관리")
+    st.caption("기존 고객 정보 조회, 특정 고객 정보 수정, 신규 고객 추가가 가능합니다.")
+
+    df_customers = get_customers()
+
+    if df_customers.empty:
+        st.warning("customers 테이블 데이터를 불러올 수 없습니다.")
+        return
+
+    tab1, tab2, tab3 = st.tabs(["📋 고객 조회", "✏️ 고객 수정", "➕ 신규 고객 추가"])
+
+    # ------------------------------------------------------------
+    # 탭 1: 고객 조회
+    # ------------------------------------------------------------
+    with tab1:
+        st.subheader("기존 고객 정보 확인")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            search_name = st.text_input("고객명 검색", placeholder="예: Maria, Smith")
+        with col2:
+            country_options = ["전체"] + sorted(df_customers["Country"].dropna().unique().tolist())
+            search_country = st.selectbox("국가 검색", country_options)
+
+        df_view = df_customers.copy()
+
+        if search_name:
+            mask = (
+                df_view["FirstName"].fillna("").str.contains(search_name, case=False, na=False)
+                | df_view["LastName"].fillna("").str.contains(search_name, case=False, na=False)
+            )
+            df_view = df_view[mask]
+
+        if search_country != "전체":
+            df_view = df_view[df_view["Country"] == search_country]
+
+        show_columns = [
+            "CustomerId", "FirstName", "LastName", "Company",
+            "City", "Country", "Email", "Phone", "SupportRepId"
+        ]
+
+        st.dataframe(
+            df_view[show_columns],
+            use_container_width=True,
+            height=450,
+            hide_index=True,
+        )
+        st.caption(f"조회 결과: {len(df_view)}명")
+
+    # ------------------------------------------------------------
+    # 탭 2: 고객 수정
+    # ------------------------------------------------------------
+    with tab2:
+        st.subheader("특정 고객 정보 업데이트")
+
+        customer_options = df_customers.apply(
+            lambda row: f"{int(row['CustomerId'])} | {row['FirstName']} {row['LastName']} | {row['Country']}",
+            axis=1
+        ).tolist()
+
+        selected_customer = st.selectbox("수정할 고객 선택", customer_options)
+
+        selected_id = int(selected_customer.split("|")[0].strip())
+        customer_row = df_customers[df_customers["CustomerId"] == selected_id].iloc[0]
+
+        with st.form("update_customer_form"):
+            first_name = st.text_input("FirstName", value="" if pd.isna(customer_row["FirstName"]) else str(customer_row["FirstName"]))
+            last_name = st.text_input("LastName", value="" if pd.isna(customer_row["LastName"]) else str(customer_row["LastName"]))
+            company = st.text_input("Company", value="" if pd.isna(customer_row["Company"]) else str(customer_row["Company"]))
+            city = st.text_input("City", value="" if pd.isna(customer_row["City"]) else str(customer_row["City"]))
+            country = st.text_input("Country", value="" if pd.isna(customer_row["Country"]) else str(customer_row["Country"]))
+            email = st.text_input("Email", value="" if pd.isna(customer_row["Email"]) else str(customer_row["Email"]))
+
+            submitted = st.form_submit_button("고객 정보 수정")
+
+            if submitted:
+                if not first_name.strip() or not last_name.strip() or not email.strip():
+                    st.warning("FirstName, LastName, Email은 필수 입력값입니다.")
+                else:
+                    updated_rows = update_customer(
+                        selected_id,
+                        first_name.strip(),
+                        last_name.strip(),
+                        company.strip(),
+                        city.strip(),
+                        country.strip(),
+                        email.strip()
+                    )
+                    if updated_rows > 0:
+                        load_data.clear()
+                        st.success(f"CustomerId {selected_id} 고객 정보가 수정되었습니다.")
+                        st.rerun()
+                    else:
+                        st.error("수정된 행이 없습니다. 다시 확인해주세요.")
+
+    # ------------------------------------------------------------
+    # 탭 3: 신규 고객 추가
+    # ------------------------------------------------------------
+    with tab3:
+        st.subheader("신규 고객 추가")
+
+        with st.form("insert_customer_form"):
+            new_first_name = st.text_input("FirstName *")
+            new_last_name = st.text_input("LastName *")
+            new_company = st.text_input("Company")
+            new_city = st.text_input("City")
+            new_country = st.text_input("Country")
+            new_email = st.text_input("Email *")
+
+            submitted_new = st.form_submit_button("신규 고객 추가")
+
+            if submitted_new:
+                if not new_first_name.strip() or not new_last_name.strip() or not new_email.strip():
+                    st.warning("FirstName, LastName, Email은 필수 입력값입니다.")
+                else:
+                    new_id = insert_customer(
+                        new_first_name,
+                        new_last_name,
+                        new_company,
+                        new_city,
+                        new_country,
+                        new_email
+                    )
+                    load_data.clear()
+                    st.success(f"신규 고객이 추가되었습니다. CustomerId = {new_id}")
+                    st.rerun()
+
+
+# ============================================================
 # 메인
 # ============================================================
 def main():
-    # 데이터 로딩
     with st.spinner("데이터를 불러오는 중..."):
         data = load_data()
 
     if data is None:
-        st.error(f"❌ DB 파일을 찾을 수 없습니다: `{DB_PATH}`")
+        st.error(f"❌ DB 파일을 찾을 수 없거나 필요한 테이블이 없습니다: `{DB_PATH}`")
         st.info("이 app.py와 같은 폴더에 `chinook.db` 파일을 두고 다시 실행해주세요.")
         st.stop()
 
     df_inv_full = data["invoices"]
     df_items_full = data["items"]
 
-    # ============================================================
-    # 사이드바
-    # ============================================================
     st.sidebar.title("🎵 Chinook Analytics")
     st.sidebar.caption("음악 스토어 경영분석 대시보드")
     st.sidebar.markdown("---")
 
-    # 페이지 선택
     page = st.sidebar.radio(
         "📑 페이지 선택",
-        ["📊 매출 Overview", "🌍 고객 & 지역", "🎵 장르 & 상품", "👤 영업사원 성과"],
+        ["📊 매출 Overview", "🌍 고객 & 지역", "🎵 장르 & 상품", "👤 영업사원 성과", "🧾 고객 관리"],
     )
 
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 공통 필터")
+    if page != "🧾 고객 관리":
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🔍 공통 필터")
 
-    # 연도 범위 슬라이더
-    min_year = int(df_inv_full["Year"].min())
-    max_year = int(df_inv_full["Year"].max())
-    year_range = st.sidebar.slider(
-        "연도 범위",
-        min_value=min_year,
-        max_value=max_year,
-        value=(min_year, max_year),
-        step=1,
-    )
+        min_year = int(df_inv_full["Year"].min())
+        max_year = int(df_inv_full["Year"].max())
+        year_range = st.sidebar.slider(
+            "연도 범위",
+            min_value=min_year,
+            max_value=max_year,
+            value=(min_year, max_year),
+            step=1,
+        )
 
-    # 국가 멀티선택
-    all_countries = sorted(df_inv_full["Country"].dropna().unique().tolist())
-    countries = st.sidebar.multiselect(
-        "국가 선택 (전체 = 비워두기)",
-        options=all_countries,
-        default=[],
-        placeholder="국가를 선택하세요",
-    )
+        all_countries = sorted(df_inv_full["Country"].dropna().unique().tolist())
+        countries = st.sidebar.multiselect(
+            "국가 선택 (전체 = 비워두기)",
+            options=all_countries,
+            default=[],
+            placeholder="국가를 선택하세요",
+        )
 
-    # 필터 적용
-    df_inv_filtered = apply_filters(df_inv_full, year_range, countries)
-    df_items_filtered = apply_filters(df_items_full, year_range, countries)
+        df_inv_filtered = apply_filters(df_inv_full, year_range, countries)
+        df_items_filtered = apply_filters(df_items_full, year_range, countries)
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        f"""
-        **현재 선택**
-        - 기간: {year_range[0]}~{year_range[1]}
-        - 국가: {len(countries) if countries else '전체'}
-        - 주문: {len(df_inv_filtered):,}건
-        - 매출: {format_currency(df_inv_filtered['Total'].sum())}
-        """
-    )
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(
+            f"""
+            **현재 선택**
+            - 기간: {year_range[0]}~{year_range[1]}
+            - 국가: {len(countries) if countries else '전체'}
+            - 주문: {len(df_inv_filtered):,}건
+            - 매출: {format_currency(df_inv_filtered['Total'].sum())}
+            """
+        )
 
-    # ============================================================
-    # 페이지 라우팅
-    # ============================================================
-    if page == "📊 매출 Overview":
-        page_overview(df_inv_filtered, df_inv_full)
-    elif page == "🌍 고객 & 지역":
-        page_customers(df_inv_filtered)
-    elif page == "🎵 장르 & 상품":
-        page_genres(df_items_filtered)
-    elif page == "👤 영업사원 성과":
-        page_sales_rep(df_inv_filtered)
+        if page == "📊 매출 Overview":
+            page_overview(df_inv_filtered, df_inv_full)
+        elif page == "🌍 고객 & 지역":
+            page_customers(df_inv_filtered)
+        elif page == "🎵 장르 & 상품":
+            page_genres(df_items_filtered)
+        elif page == "👤 영업사원 성과":
+            page_sales_rep(df_inv_filtered)
 
-    # 푸터
+    else:
+        page_customer_management()
+
     st.markdown("---")
     st.caption("📚 Chinook Sample Database | Built with Streamlit + Plotly")
 
