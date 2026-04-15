@@ -593,8 +593,55 @@ def page_customers(df_inv):
         kind="success"
     )
 
+        # ------------------------------------------------------------
+    # 5. 탑 고객 시계열 매출 추이
     # ------------------------------------------------------------
-    # 5. 고객당 평균 매출 Top 국가
+    st.subheader("📈 탑 고객 월별 매출 추이")
+
+    top_n = 5
+    top_customers = customer_rank_raw.head(top_n)["CustomerName"].tolist()
+
+    customer_ts = (
+        df_inv[df_inv["CustomerName"].isin(top_customers)]
+        .groupby(["YearMonth", "CustomerName"])["Total"]
+        .sum()
+        .reset_index()
+        .sort_values("YearMonth")
+    )
+
+    fig_top_customer_ts = px.line(
+        customer_ts,
+        x="YearMonth",
+        y="Total",
+        color="CustomerName",
+        markers=True,
+        color_discrete_sequence=COLOR_PALETTE,
+        labels={
+            "YearMonth": "연-월",
+            "Total": "매출 ($)",
+            "CustomerName": "고객명",
+        },
+    )
+    fig_top_customer_ts.update_layout(
+        hovermode="x unified",
+        xaxis=dict(tickangle=-45),
+        yaxis_title="매출 ($)",
+        legend_title="탑 고객",
+    )
+    st.plotly_chart(
+        style_plotly(fig_top_customer_ts, height=420),
+        use_container_width=True
+    )
+
+    latest_top_customer = customer_rank_raw.iloc[0]["CustomerName"]
+    render_chart_insight(
+        f"인사이트: 상위 고객의 월별 구매 추이를 통해 "
+        f"{latest_top_customer}와 같은 핵심 고객이 "
+        f"지속형 고객인지, 특정 시점 집중 구매 고객인지 구분할 수 있습니다."
+    )
+    
+    # ------------------------------------------------------------
+    # 6. 고객당 평균 매출 Top 국가
     # ------------------------------------------------------------
     st.subheader("💰 고객당 평균 매출 Top 국가")
     country_eff = df_inv.groupby("Country").agg(
