@@ -84,23 +84,3 @@ SQLite 기반 Chinook 데이터베이스를 사용했으며, Plotly 시각화를
 따라서 프로모션 시점, 캠페인 운영, 목표 설정에 활용할 수 있다.
 
 ---
-
-## 4. 사용된 SQL 구문 설명
-
-이 대시보드는 SQLite 데이터베이스에서 여러 테이블을 조회하고 조인하여 분석 데이터를 생성한다.
-
-### (1) 인보이스와 고객, 영업사원 정보를 결합하는 SQL
-```sql
-SELECT
-    i.InvoiceId,
-    i.CustomerId,
-    i.InvoiceDate,
-    i.BillingCountry AS Country,
-    i.BillingCity AS City,
-    i.Total,
-    c.FirstName || ' ' || c.LastName AS CustomerName,
-    c.SupportRepId,
-    e.FirstName || ' ' || e.LastName AS SalesRep
-FROM invoices i
-LEFT JOIN customers c ON i.CustomerId = c.CustomerId
-LEFT JOIN employees e ON c.SupportRepId = e.EmployeeId
