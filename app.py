@@ -420,7 +420,6 @@ def page_overview(df_inv, df_inv_full):
     )
     st.plotly_chart(style_plotly(fig_heat, height=350), use_container_width=True)
 
-    # 인사이트
     st.markdown("---")
     yearly_sorted = yearly.sort_values("Revenue", ascending=False)
     best_year = int(yearly_sorted.iloc[0]["Year"])
@@ -529,6 +528,81 @@ def page_customers(df_inv):
     )
     st.caption(f"총 {len(customer_rank)}명의 고객")
 
+    # 추가 차트 1: 도시별 매출 Top 10
+    st.markdown("---")
+    st.subheader("🏙️ 도시별 매출 Top 10")
+    city_rev = (
+        df_inv[df_inv["City"].notna()]
+        .groupby("City")["Total"]
+        .sum()
+        .reset_index()
+        .sort_values("Total", ascending=False)
+        .head(10)
+    )
+
+    fig_city = px.bar(
+        city_rev.sort_values("Total"),
+        x="Total",
+        y="City",
+        orientation="h",
+        text=city_rev.sort_values("Total")["Total"].apply(lambda v: f"${v:,.0f}"),
+        color="Total",
+        color_continuous_scale="Tealgrn",
+    )
+    fig_city.update_traces(textposition="outside")
+    fig_city.update_layout(
+        xaxis_title="매출 ($)",
+        yaxis_title="도시",
+        coloraxis_showscale=False,
+    )
+    st.plotly_chart(style_plotly(fig_city, height=420), use_container_width=True)
+
+    # 추가 차트 2: 고객당 평균 매출 Top 국가
+    st.subheader("💰 고객당 평균 매출 Top 국가")
+    country_eff = df_inv.groupby("Country").agg(
+        Revenue=("Total", "sum"),
+        Customers=("CustomerId", "nunique"),
+    ).reset_index()
+    country_eff = country_eff[country_eff["Customers"] > 0].copy()
+    country_eff["RevenuePerCustomer"] = country_eff["Revenue"] / country_eff["Customers"]
+    country_eff = country_eff.sort_values("RevenuePerCustomer", ascending=False).head(10)
+
+    fig_eff = px.bar(
+        country_eff.sort_values("RevenuePerCustomer"),
+        x="RevenuePerCustomer",
+        y="Country",
+        orientation="h",
+        text=country_eff.sort_values("RevenuePerCustomer")["RevenuePerCustomer"].apply(lambda v: f"${v:,.2f}"),
+        color="RevenuePerCustomer",
+        color_continuous_scale="Sunset",
+    )
+    fig_eff.update_traces(textposition="outside")
+    fig_eff.update_layout(
+        xaxis_title="고객당 평균 매출 ($)",
+        yaxis_title="국가",
+        coloraxis_showscale=False,
+    )
+    st.plotly_chart(style_plotly(fig_eff, height=420), use_container_width=True)
+
+    # 추가 차트 3: 고객별 누적 구매액 분포
+    st.subheader("👥 고객별 누적 구매액 분포")
+    customer_sales = df_inv.groupby("CustomerId").agg(
+        CustomerName=("CustomerName", "first"),
+        TotalSpent=("Total", "sum")
+    ).reset_index()
+
+    fig_hist = px.histogram(
+        customer_sales,
+        x="TotalSpent",
+        nbins=15,
+        labels={"TotalSpent": "고객별 누적 구매액 ($)"},
+    )
+    fig_hist.update_layout(
+        xaxis_title="고객별 누적 구매액 ($)",
+        yaxis_title="고객 수",
+    )
+    st.plotly_chart(style_plotly(fig_hist, height=400), use_container_width=True)
+
     # 인사이트
     st.markdown("---")
     full_country = df_inv.groupby("Country")["Total"].sum().sort_values(ascending=False)
@@ -540,10 +614,16 @@ def page_customers(df_inv):
     top10_share = safe_percent(customer_contrib.head(10).sum(), customer_contrib.sum())
 
     highest_avg_order = scatter.sort_values("AvgOrder", ascending=False).iloc[0]
+
+    top_city = city_rev.sort_values("Total", ascending=False).iloc[0]
+    top_eff_country = country_eff.sort_values("RevenuePerCustomer", ascending=False).iloc[0]
+
     insights = [
         f"국가별 매출 1위는 {top_country}이며, 전체 매출의 {top_country_share:.1f}%를 차지합니다.",
         f"상위 10명의 고객이 전체 매출의 {top10_share:.1f}%를 기여해 핵심 고객 집중도가 존재합니다.",
-        f"고객 수 대비 평균 주문액이 가장 높은 국가는 {highest_avg_order['Country']}이며, 평균 주문액은 {format_currency(highest_avg_order['AvgOrder'])}입니다."
+        f"고객 수 대비 평균 주문액이 가장 높은 국가는 {highest_avg_order['Country']}이며, 평균 주문액은 {format_currency(highest_avg_order['AvgOrder'])}입니다.",
+        f"도시 기준 매출 1위는 {top_city['City']}이며, 누적 매출은 {format_currency(top_city['Total'])}입니다.",
+        f"고객당 평균 매출이 가장 높은 국가는 {top_eff_country['Country']}이며, 고객 1인당 평균 매출은 {format_currency(top_eff_country['RevenuePerCustomer'])}입니다."
     ]
     render_insight_box("비즈니스 인사이트", insights, box_type="success")
 
@@ -646,7 +726,6 @@ def page_genres(df_items):
     )
     st.plotly_chart(style_plotly(fig_artist, height=500), use_container_width=True)
 
-    # 인사이트
     st.markdown("---")
     genre_revenue = df_items.groupby("Genre")["LineTotal"].sum().sort_values(ascending=False)
     top_genre = genre_revenue.index[0]
@@ -767,7 +846,6 @@ def page_sales_rep(df_inv):
     )
     st.plotly_chart(style_plotly(fig_dist, height=500), use_container_width=True)
 
-    # 인사이트
     st.markdown("---")
     top_rep = rep_summary.iloc[0]
     top_rep_share = safe_percent(top_rep["매출"], rep_summary["매출"].sum())
