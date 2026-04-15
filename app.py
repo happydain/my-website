@@ -45,24 +45,6 @@ def get_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def table_exists(table_name: str) -> bool:
-    """테이블 존재 여부 확인"""
-    if not os.path.exists(DB_PATH):
-        return False
-
-    conn = get_connection()
-    try:
-        query = """
-            SELECT name
-            FROM sqlite_master
-            WHERE type='table' AND lower(name)=lower(?)
-        """
-        row = conn.execute(query, (table_name,)).fetchone()
-        return row is not None
-    finally:
-        conn.close()
-
-
 def get_table_name(candidates):
     """후보 테이블명 중 실제 존재하는 이름 반환"""
     if not os.path.exists(DB_PATH):
@@ -89,7 +71,7 @@ def get_table_name(candidates):
 # ============================================================
 @st.cache_data(show_spinner=False)
 def load_data():
-    """DB에서 모든 필요한 데이터를 로드해서 dict로 반환"""
+    """DB에서 필요한 데이터를 로드"""
     if not os.path.exists(DB_PATH):
         return None
 
@@ -102,13 +84,14 @@ def load_data():
     album_table = get_table_name(["albums", "Album"])
     artist_table = get_table_name(["artists", "Artist"])
 
-    if not all([invoice_table, customer_table, employee_table, invoice_line_table,
-                track_table, genre_table, album_table, artist_table]):
+    if not all([
+        invoice_table, customer_table, employee_table, invoice_line_table,
+        track_table, genre_table, album_table, artist_table
+    ]):
         return None
 
     conn = get_connection()
     try:
-        # 1) 매출 마스터 (invoices + customers + employees join)
         invoices_query = f"""
             SELECT
                 i.InvoiceId,
@@ -130,7 +113,6 @@ def load_data():
         df_invoices["Month"] = df_invoices["InvoiceDate"].dt.month
         df_invoices["YearMonth"] = df_invoices["InvoiceDate"].dt.to_period("M").astype(str)
 
-        # 2) 라인 아이템 (invoice_lines + tracks + genres + albums + artists join)
         items_query = f"""
             SELECT
                 ii.InvoiceLineId,
@@ -214,7 +196,7 @@ def get_first_support_rep_id():
 
 
 def update_customer(customer_id, first_name, last_name, company, city, country, email):
-    """특정 고객 정보 수정"""
+    """고객 정보 수정"""
     customer_table = get_table_name(["customers", "Customer"])
     if not customer_table:
         raise ValueError("customers 테이블을 찾을 수 없습니다.")
@@ -282,7 +264,7 @@ def insert_customer(first_name, last_name, company, city, country, email):
 # 유틸리티 함수
 # ============================================================
 def apply_filters(df, year_range, countries):
-    """공통 필터 적용 (연도 범위, 국가)"""
+    """공통 필터 적용"""
     mask = (df["Year"] >= year_range[0]) & (df["Year"] <= year_range[1])
     if countries:
         mask &= df["Country"].isin(countries)
@@ -290,7 +272,7 @@ def apply_filters(df, year_range, countries):
 
 
 def style_plotly(fig, height=400):
-    """Plotly 차트 공통 스타일링"""
+    """Plotly 차트 공통 스타일"""
     fig.update_layout(
         font=PLOTLY_FONT,
         height=height,
@@ -303,11 +285,30 @@ def style_plotly(fig, height=400):
 
 
 def format_currency(value):
-    """통화 형식으로 포맷팅"""
     try:
         return f"${value:,.2f}"
     except Exception:
         return "$0.00"
+
+
+def safe_percent(numerator, denominator):
+    if denominator == 0:
+        return 0
+    return (numerator / denominator) * 100
+
+
+def render_insight_box(title, insights, box_type="info"):
+    """인사이트 박스 출력"""
+    text = f"**{title}**\n\n"
+    for idx, insight in enumerate(insights, 1):
+        text += f"{idx}. {insight}\n\n"
+
+    if box_type == "success":
+        st.success(text)
+    elif box_type == "warning":
+        st.warning(text)
+    else:
+        st.info(text)
 
 
 # ============================================================
@@ -419,6 +420,23 @@ def page_overview(df_inv, df_inv_full):
     )
     st.plotly_chart(style_plotly(fig_heat, height=350), use_container_width=True)
 
+    # 인사이트
+    st.markdown("---")
+    yearly_sorted = yearly.sort_values("Revenue", ascending=False)
+    best_year = int(yearly_sorted.iloc[0]["Year"])
+    best_year_revenue = yearly_sorted.iloc[0]["Revenue"]
+
+    month_rev = df_inv.groupby("Month")["Total"].sum().reset_index().sort_values("Total", ascending=False)
+    best_month = int(month_rev.iloc[0]["Month"])
+    best_month_revenue = month_rev.iloc[0]["Total"]
+
+    insights = [
+        f"선택한 기간의 총매출은 {format_currency(total_revenue)}이며, 총 {total_orders:,}건의 주문이 발생해 평균 주문액은 {format_currency(avg_order)}입니다.",
+        f"가장 높은 연간 매출을 기록한 시점은 {best_year}년이며, 해당 연도 매출은 {format_currency(best_year_revenue)}입니다.",
+        f"월 기준으로는 {best_month}월 매출이 가장 높았고, 누적 매출은 {format_currency(best_month_revenue)}입니다."
+    ]
+    render_insight_box("비즈니스 인사이트", insights, box_type="info")
+
 
 # ============================================================
 # 페이지 2: 고객 & 지역 분석
@@ -510,6 +528,24 @@ def page_customers(df_inv):
         hide_index=True,
     )
     st.caption(f"총 {len(customer_rank)}명의 고객")
+
+    # 인사이트
+    st.markdown("---")
+    full_country = df_inv.groupby("Country")["Total"].sum().sort_values(ascending=False)
+    top_country = full_country.index[0]
+    top_country_revenue = full_country.iloc[0]
+    top_country_share = safe_percent(top_country_revenue, full_country.sum())
+
+    customer_contrib = df_inv.groupby("CustomerId")["Total"].sum().sort_values(ascending=False)
+    top10_share = safe_percent(customer_contrib.head(10).sum(), customer_contrib.sum())
+
+    highest_avg_order = scatter.sort_values("AvgOrder", ascending=False).iloc[0]
+    insights = [
+        f"국가별 매출 1위는 {top_country}이며, 전체 매출의 {top_country_share:.1f}%를 차지합니다.",
+        f"상위 10명의 고객이 전체 매출의 {top10_share:.1f}%를 기여해 핵심 고객 집중도가 존재합니다.",
+        f"고객 수 대비 평균 주문액이 가장 높은 국가는 {highest_avg_order['Country']}이며, 평균 주문액은 {format_currency(highest_avg_order['AvgOrder'])}입니다."
+    ]
+    render_insight_box("비즈니스 인사이트", insights, box_type="success")
 
 
 # ============================================================
@@ -610,6 +646,29 @@ def page_genres(df_items):
     )
     st.plotly_chart(style_plotly(fig_artist, height=500), use_container_width=True)
 
+    # 인사이트
+    st.markdown("---")
+    genre_revenue = df_items.groupby("Genre")["LineTotal"].sum().sort_values(ascending=False)
+    top_genre = genre_revenue.index[0]
+    top_genre_revenue = genre_revenue.iloc[0]
+    top_genre_share = safe_percent(top_genre_revenue, genre_revenue.sum())
+
+    artist_top = df_items.groupby("Artist")["LineTotal"].sum().sort_values(ascending=False)
+    top_artist = artist_top.index[0]
+    top_artist_revenue = artist_top.iloc[0]
+
+    top6_revenue_share = safe_percent(
+        df_items[df_items["Genre"].isin(top_genres)]["LineTotal"].sum(),
+        df_items["LineTotal"].sum()
+    )
+
+    insights = [
+        f"가장 높은 매출을 기록한 장르는 {top_genre}이며, 전체 장르 매출의 {top_genre_share:.1f}%를 차지합니다.",
+        f"매출 기준 1위 아티스트는 {top_artist}이며, 누적 매출은 {format_currency(top_artist_revenue)}입니다.",
+        f"상위 6개 장르가 전체 장르 매출의 {top6_revenue_share:.1f}%를 차지해 장르별 매출 집중 현상이 나타납니다."
+    ]
+    render_insight_box("비즈니스 인사이트", insights, box_type="info")
+
 
 # ============================================================
 # 페이지 4: 영업사원 성과
@@ -708,6 +767,21 @@ def page_sales_rep(df_inv):
     )
     st.plotly_chart(style_plotly(fig_dist, height=500), use_container_width=True)
 
+    # 인사이트
+    st.markdown("---")
+    top_rep = rep_summary.iloc[0]
+    top_rep_share = safe_percent(top_rep["매출"], rep_summary["매출"].sum())
+
+    best_customer_rep = rep_summary.sort_values("고객수", ascending=False).iloc[0]
+    best_order_rep = rep_summary.sort_values("주문수", ascending=False).iloc[0]
+
+    insights = [
+        f"매출 기준 1위 영업사원은 {top_rep['SalesRep']}이며, 전체 담당자 매출의 {top_rep_share:.1f}%를 차지합니다.",
+        f"고객 수를 가장 많이 관리하는 담당자는 {best_customer_rep['SalesRep']}이며, 총 {int(best_customer_rep['고객수'])}명의 고객을 담당합니다.",
+        f"주문 건수 기준 최고 성과 담당자는 {best_order_rep['SalesRep']}이며, 총 {int(best_order_rep['주문수'])}건의 주문을 처리했습니다."
+    ]
+    render_insight_box("비즈니스 인사이트", insights, box_type="success")
+
 
 # ============================================================
 # 페이지 5: 고객 관리
@@ -724,9 +798,6 @@ def page_customer_management():
 
     tab1, tab2, tab3 = st.tabs(["📋 고객 조회", "✏️ 고객 수정", "➕ 신규 고객 추가"])
 
-    # ------------------------------------------------------------
-    # 탭 1: 고객 조회
-    # ------------------------------------------------------------
     with tab1:
         st.subheader("기존 고객 정보 확인")
 
@@ -762,9 +833,6 @@ def page_customer_management():
         )
         st.caption(f"조회 결과: {len(df_view)}명")
 
-    # ------------------------------------------------------------
-    # 탭 2: 고객 수정
-    # ------------------------------------------------------------
     with tab2:
         st.subheader("특정 고객 정보 업데이트")
 
@@ -808,9 +876,6 @@ def page_customer_management():
                     else:
                         st.error("수정된 행이 없습니다. 다시 확인해주세요.")
 
-    # ------------------------------------------------------------
-    # 탭 3: 신규 고객 추가
-    # ------------------------------------------------------------
     with tab3:
         st.subheader("신규 고객 추가")
 
